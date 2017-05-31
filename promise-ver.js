@@ -11,13 +11,6 @@ const myfs = {
     writeFile: util.promisify(fs.writeFile)
 };
 
-if (process.argv.length < 3) {
-    console.log('Usage: node index.js <path to input directory>');
-    return;
-}
-
-const inputDirname = process.argv[2];
-
 class ColumnMetadata {
     constructor(columnName, dataType) {
         this.name = columnName;
@@ -25,69 +18,79 @@ class ColumnMetadata {
     }
 }
 
-const listDir = async (dirPath, filenameArr) => {
+const listDir = (dirPath, filenameArr) => {
     for (const filename of filenameArr) {
         const filePath = path.join(dirPath, filename);
 
-        const stats = await myfs.stat(filePath);
-        if (stats.isDirectory()) {
-            const filePathContents = await myfs.readdir(filePath);
-            listDir(filePath, filePathContents);
-        }
-        else if (stats.isFile() && path.extname(filename) === '.csv') {
-            const inputFilenameWithoutExtension = path.basename(filename, '.csv');
-            const outputFilename = inputFilenameWithoutExtension + '.sql';
-            const outputFilePath = path.join(dirPath, outputFilename);
-            console.info(`begin processing CSV file ${inputFilenameWithoutExtension}`);
-
-            const rawCsvContent = await myfs.readFile(filePath);
-            const csvDataArr = await parseCsv(rawCsvContent);
-
-            if (csvDataArr.length <= 1) {
-                try {
-                    await myfs.unlink(outputFilePath);
-                    console.info(`Delete file ${outputFilePath} success`);
-                }
-                catch (err) {
-                    console.info(`Delete file ${outputFilePath} failed (maybe because the file did not exist)`);
-                }
-
-                return;
+        myfs.stat(filePath).then(stats => {
+            if (stats.isDirectory()) {
+                myfs.readdir(filePath).then(listDir.bind(null, filePath));
             }
-            
-            // compute metadata from header row
-            const columnMetadataMap = computeMetadataFrom(csvDataArr[0]);
+            else if (stats.isFile() && path.extname(filename) === '.csv') {
+                const inputFilenameWithoutExtension = path.basename(filename, '.csv');
+                const outputFilename = inputFilenameWithoutExtension + '.sql';
+                const outputFilePath = path.join(dirPath, outputFilename);
+                console.info(`begin processing CSV file ${inputFilenameWithoutExtension}`);
 
-            // compute select statements string from CSV rows
-            const selectStatements = computeUnionedSelectStatementsFrom(csvDataArr, columnMetadataMap);
-            const sqlObjectType = `rec_${inputFilenameWithoutExtension}`;
-            const sqlObjectConstructorParamString = computeSqlObjectConstructorParamString(columnMetadataMap);
-            const result = `cursor c1 is ${selectStatements}
+                /* the .then(csvDataArr) line is where the Promise approach differs from callback
+                */
+                myfs.readFile(filePath).then(rawCsvContent => {
+                    return parseCsv(rawCsvContent);
+                }).then(csvDataArr => {
+                    if (csvDataArr.length <= 1) {
+                        myfs.unlink(outputFilePath).then(() => {
+                            console.info(`Delete file ${outputFilePath} success`);
+                        }, err => {
+                            console.info(`Delete file ${outputFilePath} failed (maybe because the file did not exist)`);
+                        });
+
+                        return;
+                    }
+                    
+                    // compute metadata from header row
+                    const columnMetadataMap = computeMetadataFrom(csvDataArr[0]);
+
+                    // compute select statements string from CSV rows
+                    const selectStatements = computeUnionedSelectStatementsFrom(csvDataArr, columnMetadataMap);
+                    const sqlObjectType = `rec_${inputFilenameWithoutExtension}`;
+                    const sqlObjectConstructorParamString = computeSqlObjectConstructorParamString(columnMetadataMap);
+                    const result = `cursor c1 is ${selectStatements}
 
 temp ${sqlObjectType};
 begin
-    for rec in c1
-    loop
-        temp := ${sqlObjectType}(${sqlObjectConstructorParamString});
-        pipe row (temp);
-    end loop;
+for rec in c1
+loop
+    temp := ${sqlObjectType}(${sqlObjectConstructorParamString});
+    pipe row (temp);
+end loop;
 end;
 `;
 
-            await myfs.writeFile(outputFilePath, result);
-            console.info(`Write result to ${outputFilePath} success`);
-        }
+                    myfs.writeFile(outputFilePath, result).then(() => {
+                        console.info(`Write result to ${outputFilePath} success`);
+                    });
+                });
+            }
+        });
     }
 };
 
-process.on('unhandledRejection', (reason, promise) => {
-    throw reason;
-});
+main();
 
-(async () => {
-    const inputDirnameContents = await myfs.readdir(inputDirname);
-    listDir(inputDirname, inputDirnameContents);
-})();
+function main() {
+    if (process.argv.length < 3) {
+        console.log('Usage: node index.js <path to input directory>');
+        return;
+    }
+
+    const inputDirname = process.argv[2];
+
+    process.on('unhandledRejection', (reason, promise) => {
+        throw reason;
+    });
+
+    myfs.readdir(inputDirname).then(listDir.bind(null, inputDirname));
+}
 
 function computeMetadataFrom(headerRow) {
     const regex = /(\w+) \((\w+)\)/;
