@@ -1,6 +1,15 @@
 const fs = require('fs');
 const path = require('path');
-const parseCsv = require('csv-parse');
+const util = require('util');
+const parseCsv = util.promisify(require('csv-parse'));
+
+const myfs = {
+    readdir: util.promisify(fs.readdir),
+    stat: util.promisify(fs.stat),
+    readFile: util.promisify(fs.readFile),
+    unlink: util.promisify(fs.unlink),
+    writeFile: util.promisify(fs.writeFile)
+};
 
 if (process.argv.length < 3) {
     console.log('Usage: node index.js <path to input directory>');
@@ -16,14 +25,13 @@ class ColumnMetadata {
     }
 }
 
-const cbListDir = (dirPath, err, filenameArr) => {
+const listDir = (dirPath, filenameArr) => {
     for (const filename of filenameArr) {
         const filePath = path.join(dirPath, filename);
 
-        const cbProcessDirEntry = (err, stats) => {
+        myfs.stat(filePath).then(stats => {
             if (stats.isDirectory()) {
-                const cb = cbListDir.bind(null, filePath);
-                fs.readdir(filePath, cb);
+                myfs.readdir(filePath).then(listDir.bind(null, filePath));
             }
             else if (stats.isFile() && path.extname(filename) === '.csv') {
                 const inputFilenameWithoutExtension = path.basename(filename, '.csv');
@@ -31,18 +39,15 @@ const cbListDir = (dirPath, err, filenameArr) => {
                 const outputFilePath = path.join(dirPath, outputFilename);
                 console.info(`begin processing CSV file ${inputFilenameWithoutExtension}`);
 
-                const cbParseCsv = (err, csvContents) => {
-                    const cbProcessCsv = (err, csvDataArr) => {
+                myfs.readFile(filePath).then(rawCsvContent => {
+                    parseCsv(rawCsvContent).then(csvDataArr => {
                         if (csvDataArr.length <= 1) {
-                            // delete existing output file, if any
-                            fs.unlink(outputFilePath, err => {
-                                if (err) {
-                                    console.info(`Delete file ${outputFilePath} failed (maybe because the file did not exist)`);
-                                }
-                                else {
-                                    console.info(`Delete file ${outputFilePath} success`);
-                                }
+                            myfs.unlink(outputFilePath).then(() => {
+                                console.info(`Delete file ${outputFilePath} success`);
+                            }, err => {
+                                console.info(`Delete file ${outputFilePath} failed (maybe because the file did not exist)`);
                             });
+
                             return;
                         }
                         
@@ -65,29 +70,23 @@ begin
 end;
 `;
 
-                        // write result to output file
-                        fs.writeFile(outputFilePath, result, err => {
-                            if (err) {
-                                throw err;
-                            }
-                            else {
-                                console.info(`Write result to ${outputFilePath} success`);
-                            }
+                        myfs.writeFile(outputFilePath, result).then(() => {
+                            console.info(`Write result to ${outputFilePath} success`);
+                        }, err => {
+                            throw err;
                         });
-                    };
-
-                    parseCsv(csvContents, cbProcessCsv);
-                };
-
-                fs.readFile(filePath, cbParseCsv)
+                    });
+                });
             }
-        };
-
-        fs.stat(filePath, cbProcessDirEntry);
+        });
     }
 };
 
-fs.readdir(inputDirname, cbListDir.bind(null, inputDirname));
+process.on('unhandledRejection', (reason, promise) => {
+    throw reason;
+});
+
+myfs.readdir(inputDirname).then(listDir.bind(null, inputDirname));
 
 function computeMetadataFrom(headerRow) {
     const regex = /(\w+) \((\w+)\)/;
